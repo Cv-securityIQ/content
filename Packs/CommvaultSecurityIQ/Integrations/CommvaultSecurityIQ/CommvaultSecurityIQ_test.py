@@ -5,7 +5,6 @@ from datetime import datetime
 from CommvaultSecurityIQ import (
     Client,
     disable_data_aging,
-    generate_access_token,
     fetch_incidents,
     get_backup_anomaly,
     if_zero_set_none,
@@ -56,7 +55,7 @@ class CommvaultClientMock(Client):
                 ]
             }
         elif endpoint == "/Subclient/11351":
-            return {"subClientProperties": [{"content": []}]}
+            return {"subClientProperties": [{"content": [{"path": "C:\\Folder"}]}]}
         elif endpoint == "/User/":
             return {"subClientProperties": [{"content": [{"path": "C:\\Folder"}]}]}
         elif endpoint.startswith("/events"):
@@ -196,6 +195,7 @@ def test_disable_data_aging():
         base_url="https://webservice_url:81",
         verify=False,
         proxy=False,  # disable-secrets-detection
+        api_token=None
     )
     response = disable_data_aging(client)
     expected_resp = {"DisableDataAgingResponse": "Error disabling data aging on the client"}
@@ -208,24 +208,13 @@ def test_copy_files_to_war_room():
     assert True
 
 
-def test_generate_access_token():
-    """Unit test function"""
-    client = CommvaultClientMock(
-        base_url="https://webservice_url:81",
-        verify=False,
-        proxy=False,  # disable-secrets-detection
-    )
-    resp = generate_access_token(client, "")
-    expected_resp = {"GenerateTokenResponse": "Successfully generated access token"}
-    assert resp.raw_response["GenerateTokenResponse"] == expected_resp["GenerateTokenResponse"]
-
-
 def test_fetch_and_disable_saml_identity_provider():
     """Unit test function"""
     client = CommvaultClientMock(
         base_url="https://webservice_url:81",
         verify=False,
         proxy=False,  # disable-secrets-detection
+        api_token=None
     )
     resp = fetch_and_disable_saml_identity_provider(client)
     expected_resp = {"DisableSamlResponse": "Successfully disabled SAML identity provider"}
@@ -238,6 +227,7 @@ def test_disable_user():
         base_url="https://webservice_url:81",
         verify=False,
         proxy=False,  # disable-secrets-detection
+        api_token=None
     )
     resp = disable_user(client, "dummy@email.com")
     expected_resp = {"DisableUserResponse": "Successfully disabled user"}
@@ -247,7 +237,7 @@ def test_disable_user():
 def test_get_access_token_from_keyvault():
     """Unit test function"""
     client = CommvaultClientMock(
-        base_url="https://webservice_url:81", verify=False, proxy=False
+        base_url="https://webservice_url:81", verify=False, proxy=False, api_token=None
     )
     resp = get_secret_from_key_vault(client)
     expected_resp = {"GetAccessTokenResponse": "secret"}
@@ -260,9 +250,10 @@ def test_fetch_incidents():
         base_url="https://webservice_url:81",
         verify=False,
         proxy=False,  # disable-secrets-detection
+        api_token=None
     )
-    _, resp = fetch_incidents(client, {}, "2 Days")
-    _, resp = fetch_incidents(client, {"last_fetch": 0}, "2 Days")
+    _, resp = fetch_incidents(client, None, "2 Days")
+    _, resp = fetch_incidents(client, None, "2 Days")
     assert resp[0]["affected_files_count"] == "145"  # type: ignore
 
 
@@ -305,6 +296,7 @@ def test_long_running_execution():
         base_url="https://webservice_url:81",
         verify=False,
         proxy=False,  # disable-secrets-detection
+        api_token=None
     )
     server: StreamServer = client.prepare_globals_and_create_server(port, "", "")
     assert server.address[1] == 33333
@@ -331,7 +323,7 @@ def test_webhook():
         ),
     }
     client = CommvaultClientMock(
-        base_url="https://webservice_url:81", verify=False, proxy=False
+        base_url="https://webservice_url:81", verify=False, proxy=False, api_token=None
     )
     incident_body = handle_post_helper(client, req, None)
     client.create_incident(
@@ -373,7 +365,7 @@ def test_misc_functions():
     )
     string = bytes(string, "utf-8")
     client = CommvaultClientMock(
-        base_url="https://webservice_url:81", verify=False, proxy=False
+        base_url="https://webservice_url:81/", verify=False, proxy=False, api_token=None
     )
     client.set_props({"AzureKeyVaultUrl": {"password": "password"}})
     key = client.get_key_vault_access_token()
@@ -416,6 +408,6 @@ def test_misc_functions():
 
 def test_validate_inputs():
     client = CommvaultClientMock(
-        base_url="https://webservice_url:81", verify=False, proxy=False
+        base_url="https://webservice_url:81", verify=False, proxy=False, api_token=None
     )
-    validate_inputs(0, client, True, True, False, "")
+    validate_inputs(0, client, True, False, "")

@@ -23,9 +23,11 @@ from pydantic import BaseModel  # pylint: disable=no-name-in-module
 from uvicorn.logging import AccessFormatter
 from urllib.parse import urlparse
 
+
 import demistomock as demisto
 from CommonServerPython import *  # noqa # pylint: disable=unused-wildcard-import
 from CommonServerUserPython import *  # noqa
+
 # Disable insecure warnings
 urllib3.disable_warnings()  # pylint: disable=no-member
 
@@ -225,6 +227,7 @@ class Constants:
     anomaly_sub_type: str = "anomaly_sub_type"
     originating_client: str = "originating_client"
     originating_program: str = "originating_program"
+    job: str = "job"
     job_id: str = "job_id"
     affected_files_count: str = "affected_files_count"
     modified_files_count: str = "modified_files_count"
@@ -261,7 +264,8 @@ def field_mapper(field_name: str, source: str = Constants.source_syslog) -> str:
         field_map[Constants.event_time] = "Event Date"
         field_map[Constants.originating_program] = "Program"
     field_map[Constants.anomaly_sub_type] = "AnomalyType"
-    field_map[Constants.job_id] = "job"
+    field_map[Constants.job] = "job"
+    field_map[Constants.job_id] = "JobId"
     field_map[Constants.originating_client] = "client"
     field_map[Constants.affected_files_count] = "SuspiciousFileCount"
     field_map[Constants.modified_files_count] = "Modified"
@@ -333,10 +337,7 @@ class Client(BaseClient):
         "paths": [{"path": "/**/*"}],
     }
 
-    access_token_expiry_in_days = 7
     access_token = None
-    access_token_last_generation = None
-    current_api_token: str = ""
     qsdk_token = None
     keyvault_tenant_id = None
     keyvault_client_id = None
@@ -345,12 +346,13 @@ class Client(BaseClient):
     key_secret_name = "access-token-for-xsoar"
     ws_url = None
 
-    def __init__(self, base_url: str, verify: bool, proxy: bool):
+    def __init__(self, base_url: str, verify: bool, proxy: bool, api_token: str):
         """
         Constructor to initialize the Commvault client object
         """
         super().__init__(base_url=base_url, verify=verify, proxy=proxy)
-        self.qsdk_token = None
+        self.access_token = api_token
+        self.qsdk_token = f"QSDK {str(api_token)}"
         if not base_url.endswith("/"):
             self.ws_url = base_url + "/"
         else:
@@ -380,9 +382,7 @@ class Client(BaseClient):
         Returns:
             self.headers
         """
-        if (
-            not hasattr(self, "qsdk_token") or self.qsdk_token is None
-        ):  # for logging in, before self.access_token is set
+        if not hasattr(self, "qsdk_token") or self.qsdk_token is None:
             return {
                 "Content-Type": "application/json",
                 "Accept": "application/json",
@@ -423,75 +423,6 @@ class Client(BaseClient):
         retval = response.json()
 
         return retval
-
-    def validate_session_or_generate_token(self, api_token: str) -> bool:
-        """
-        Check for last token generation and generate new token
-        """
-        context_info = demisto.getIntegrationContext()
-        if "tokenDetails" in context_info:
-            self.access_token = context_info.get("tokenDetails", {}).get("accessToken")
-            self.access_token_last_generation = context_info.get(
-                "tokenDetails", {}
-            ).get("accessTokenGenerationTime")
-        if self.access_token_last_generation is None:
-            demisto.debug("Token is not present, we will create new token.")
-            return self.generate_access_token(api_token)
-        else:
-            current_epoch = int(datetime.now().timestamp())
-            token_expiry_from_last_generation = int(
-                (
-                    self.access_token_last_generation
-                    + str(self.access_token_expiry_in_days * 7 * 24 * 60 * 60)
-                )
-            )
-            if current_epoch > token_expiry_from_last_generation:
-                demisto.debug("Token is expired, re-generating")
-                return self.generate_access_token(api_token)
-            else:
-                self.qsdk_token = f"QSDK {self.access_token}"
-        return True
-
-    def generate_access_token(self, api_token: str) -> bool:
-        """
-        Generate access token from API token
-        """
-        new_access_token = None
-        auth_token = "QSDK " + api_token
-        self.qsdk_token = auth_token
-        current_epoch = int(datetime.now().timestamp())
-        token_expiry_epoch = (
-            current_epoch + self.access_token_expiry_in_days * 24 * 60 * 60
-        )
-        token_name = f"soar-crt{current_epoch}-exp{token_expiry_epoch}"
-        request_body = {
-            "tokenExpires": {"time": token_expiry_epoch},
-            "scope": 2,
-            "tokenName": token_name,
-        }
-        try:
-            response = self.http_request("POST", "/ApiToken/User", None, request_body)
-            new_access_token = response.get("token")
-            current_epoch = int(datetime.now().timestamp())
-            self.current_api_token = str(new_access_token)
-            self.access_token = str(new_access_token)
-            self.qsdk_token = f"QSDK {str(new_access_token)}"
-            self.access_token_last_generation = current_epoch
-            current_token_dict = demisto.getIntegrationContext()
-            current_token_dict.update(
-                {
-                    "tokenDetails": {
-                        "accessToken": str(new_access_token),
-                        "accessTokenGenerationTime": str(current_epoch),
-                    }
-                }
-            )
-            demisto.setIntegrationContext(current_token_dict)
-
-        except Exception as error:
-            demisto.debug(f"Could not generate access token [{error}]")
-            return False
-        return True
 
     def prepare_globals_and_create_server(
         self,
@@ -602,28 +533,22 @@ class Client(BaseClient):
             demisto.createIncidents(incidents)
             # self.define_indicator(extracted_message.get("originating_client"))
 
-    def get_events_list(self, last_run, first_fetch_time, max_fetch) -> Optional[Any]:
-        """
-        Function to get events
-        """
-        self.validate_session_or_generate_token(self.current_api_token)
-        current_date = datetime.utcnow()
-        epoch = datetime(1970, 1, 1)
-        seconds_since_epoch = int((current_date - epoch).total_seconds())
-        fromtime = last_run
-        if fromtime is None:
-            fromtime = str(dateparser.parse(first_fetch_time))
-            fromtime = int(time.mktime(datetime.fromisoformat(fromtime).timetuple()))
+    def get_events(
+        self,
+        fromtime,
+        totime,
+        showMinor="false",
+        showMajor="false",
+        showCritical="false",
+    ) -> Optional[Any]:
         ustring = (
-            "/events?level=10&showInfo=false&showMinor=false&"
-            "showMajor=true&showCritical=false&"
+            f"/events?level=10&showInfo=false&showMinor={showMinor}&"
+            f"showMajor={showMajor}&showCritical={showCritical}&"
             "showAnomalous=true"
         )
-        event_endpoint = f"{ustring}&fromTime={fromtime}&toTime={seconds_since_epoch}"  # disable-secrets-detection
         headers = self.headers
-        if max_fetch is None:
-            max_fetch = 50
-        headers["pagingInfo"] = f"0,{max_fetch}"
+        headers["pagingInfo"] = "-1"
+        event_endpoint = f"{ustring}&fromTime={fromtime}&toTime={totime}"  # disable-secrets-detection
         resp = self.http_request("GET", event_endpoint, None, headers=headers)
         if resp and resp.get("commservEvents"):
             return resp.get("commservEvents")
@@ -635,7 +560,7 @@ class Client(BaseClient):
         :param subclient_id: subclient Id
         :return: string
         """
-        self.validate_session_or_generate_token(self.current_api_token)
+
         resp = self.http_request("GET", "/Subclient/" + str(subclient_id), None)
         resp = resp.get("subClientProperties", [{}])[0].get("content")
         return resp
@@ -662,30 +587,10 @@ class Client(BaseClient):
             return [], []
         files_list = self.get_files_list(job_id)
         folder_response = self.get_subclient_content_list(subclient_id)
-        for resp in folder_response:
-            folders_list.append(resp[Constants.path_key])
+        if folder_response is not None:
+            for resp in folder_response:
+                folders_list.append(resp[Constants.path_key])
         return files_list, folders_list
-
-    """def define_indicator(self, originating_client: str) -> None:
-
-        Define an indicator
-        :param originating_client: client which has generated the event
-
-        indicator_list = []
-        indicator_list.append(
-            {
-                "value": f"client [{originating_client}]",
-                "type": "Client",
-                "score": 2,
-                "rawJSON": {
-                    "value": f"client [{originating_client}]",
-                    "type": "Client",
-                    "verdict": "suspicious",
-                    "score": 2,
-                },
-            }
-        )
-        demisto.createIndicators(indicator_list)"""
 
     def parse_incoming_message(self, log_message: bytes) -> dict | None:
         """
@@ -693,7 +598,7 @@ class Client(BaseClient):
         """
         try:
             syslog_message: syslogmp.Message = parse_no_length_limit(log_message)
-            self.validate_session_or_generate_token(self.current_api_token)
+
             message = syslog_message.message.decode("utf-8")
 
             event_time = extract_from_regex(
@@ -758,8 +663,14 @@ class Client(BaseClient):
         job_id = extract_from_regex(
             message,
             "0",
-            rf"{field_mapper(Constants.job_id)} \[(.*?)\]",
+            rf"{field_mapper(Constants.job)} \[(.*?)\]",
         )
+        if job_id == "0" or job_id is None:
+            job_id = extract_from_regex(
+                message,
+                "0",
+                rf"{field_mapper(Constants.job_id)}:\[(.*?)\]",
+            )
 
         description = format_alert_description(message)
 
@@ -779,7 +690,12 @@ class Client(BaseClient):
             .get("subclient", {})
             .get("subclientId")
         )
-        files_list, scanned_folder_list = self.fetch_file_details(job_id, subclient_id)
+        if subclient_id != 0:
+            files_list, scanned_folder_list = self.fetch_file_details(
+                job_id, subclient_id
+            )
+        else:
+            files_list, scanned_folder_list = [], []
         details = {
             "subclient_id": subclient_id,
             "files_list": files_list,
@@ -857,7 +773,7 @@ class Client(BaseClient):
         :return: string
         """
         out = None
-        self.validate_session_or_generate_token(self.current_api_token)
+
         response = self.http_request("GET", "/Job/" + str(job_id), None)
         if ("totalRecordsWithoutPaging" in response) and (
             int(response["totalRecordsWithoutPaging"]) > 0
@@ -874,7 +790,7 @@ class Client(BaseClient):
         self.job_details_body["advOptions"] = {
             "advConfig": {"browseAdvancedConfigBrowseByJob": {"jobId": int(job_id)}}
         }
-        self.validate_session_or_generate_token(self.current_api_token)
+
         resp = self.http_request("POST", "/DoBrowse", None, self.job_details_body)
         browse_responses = resp.get("browseResponses", [])
         file_list = []
@@ -957,7 +873,7 @@ class Client(BaseClient):
         """
         not_enable = False
         try:
-            self.validate_session_or_generate_token(self.current_api_token)
+
             response = self.http_request("GET", f"/V4/SAML/{identity_server_name}")
             if "error" in response:
                 demisto.debug(
@@ -988,7 +904,7 @@ class Client(BaseClient):
         """
         Fetch SAML Providers and disable them
         """
-        self.validate_session_or_generate_token(self.current_api_token)
+
         response = self.http_request("GET", "/IdentityServers")
         if "errorMessage" in response:
             return False
@@ -1009,7 +925,7 @@ class Client(BaseClient):
         """
         user_id = None
         try:
-            self.validate_session_or_generate_token(self.current_api_token)
+
             response = self.http_request("GET", "/User?level=10")
             userslist = response["users"]
             current_user = next(
@@ -1171,62 +1087,71 @@ def fetch_incidents(
 
     max_fetch = demisto.params().get("max_fetch")
 
-    events = client.get_events_list(
-        None if (last_run is None) else last_run, first_fetch_time, max_fetch
-    )
-
+    fromtime = last_run
+    if fromtime is None:
+        fromtime = str(dateparser.parse(first_fetch_time))
+        fromtime = int(time.mktime(datetime.fromisoformat(fromtime).timetuple()))
+    fromtime = int(fromtime)
     current_date = datetime.utcnow()
     epoch = datetime(1970, 1, 1)
-
-    seconds_since_epoch = int((current_date - epoch).total_seconds())
+    totime = int(
+        (current_date - epoch).total_seconds()
+    )  # current time in utc timestamp
+    step = (totime - fromtime) // 10
     out = []
-
-    if events is None:
-        demisto.info("There are no events")
-        return {"lastRun": str(seconds_since_epoch)}, None
     domain = client.get_host()
-
-    events = sorted(events, key=lambda d: d.get("timeSource"))
-
     lasttimestamp = None
-
-    for event in events:
-        if event.get("eventCodeString") == "14:337":
-            lasttimestamp = {"lastRun": str(int(event.get("timeSource")) + 1)}
-            event_id = event[
-                field_mapper(Constants.event_id, Constants.source_fetch_incidents)
-            ]
-            event_time = event[
-                field_mapper(Constants.event_time, Constants.source_fetch_incidents)
-            ]
-            incident = {
-                "facility": Constants.facility,
-                "msg": None,
-                "msg_id": None,
-                "process_id": None,
-                "sd": {},
-                "host_name": domain,
-                "timestamp": datetime.fromtimestamp(seconds_since_epoch).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                ),
-                "occurred": None,
-                "event_id": event_id,
-                "event_time": datetime.fromtimestamp(event_time).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                ),
-                "originating_program": event[
-                    field_mapper(
-                        Constants.originating_program,
-                        Constants.source_fetch_incidents,
-                    )
-                ],
-            }
-            det = client.get_incident_details(event[Constants.description])
-            if det.get(Constants.anomaly_sub_type, "Undefined") == "File Type":  # type: ignore
-                incident.update(det)  # type: ignore
-                out.append(incident)
+    for i in range(10):
+        starttime = fromtime + (i * step)
+        endtime = fromtime + ((i + 1) * step)
+        events = client.get_events(
+            starttime, endtime, showMajor="true", showCritical="true"
+        )
+        if events is not None:
+            events = sorted(events, key=lambda d: d.get("timeSource"))
+            for event in events:
+                if event.get("eventCodeString") == "14:337":
+                    lasttimestamp = {"lastRun": str(int(event.get("timeSource")) + 1)}
+                    event_id = event[
+                        field_mapper(
+                            Constants.event_id, Constants.source_fetch_incidents
+                        )
+                    ]
+                    event_time = event[
+                        field_mapper(
+                            Constants.event_time, Constants.source_fetch_incidents
+                        )
+                    ]
+                    incident = {
+                        "facility": Constants.facility,
+                        "msg": None,
+                        "msg_id": None,
+                        "process_id": None,
+                        "sd": {},
+                        "host_name": domain,
+                        "timestamp": datetime.fromtimestamp(totime).strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        ),
+                        "occurred": None,
+                        "event_id": event_id,
+                        "event_time": datetime.fromtimestamp(event_time).strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        ),
+                        "originating_program": event[
+                            field_mapper(
+                                Constants.originating_program,
+                                Constants.source_fetch_incidents,
+                            )
+                        ],
+                    }
+                    det = client.get_incident_details(event[Constants.description])
+                    if det is not None and det.get(Constants.anomaly_sub_type, "Undefined") == "File Type":  # type: ignore
+                        incident.update(det)
+                        out.append(incident)
+                        if len(out) == max_fetch:
+                            break
     if lasttimestamp is None:
-        lasttimestamp = {"lastRun": str(seconds_since_epoch)}
+        lasttimestamp = {"lastRun": str(totime)}
     return lasttimestamp, out
 
 
@@ -1255,19 +1180,6 @@ def copy_files_to_war_room():
         out_resp = out_resp + file_["folder"] + "\\" + file_["filename"] + "\n"
     demisto.results(fileResult("Suspiciousfiles.txt", str(out_resp).encode()))
     return "Copied files to the War Room with the file name Suspiciousfiles.txt"
-
-
-def generate_access_token(client, cv_api_token):
-    resp = None
-    if client.generate_access_token(cv_api_token):
-        resp = "Successfully generated access token"
-    else:
-        raise DemistoException("Could not generate access token")
-    return CommandResults(
-        outputs_prefix="CommvaultSecurityIQ.GenerateToken",
-        outputs_key_field="GenerateToken",
-        outputs={"GenerateTokenResponse": resp},
-    )
 
 
 def fetch_and_disable_saml_identity_provider(client):
@@ -1313,8 +1225,8 @@ def get_secret_from_key_vault(client):
 def get_params(params):
     return (
         params.get("first_fetch", "1 day").strip(),
-        params.get('creds_certificate', {}).get('identifier'),
-        params.get('creds_certificate', {}).get('password', ''),
+        params.get("creds_certificate", {}).get("identifier"),
+        params.get("creds_certificate", {}).get("password", ""),
         params.get("CVWebserviceUrl", ""),
         params.get("incidentType", "Commvault Suspicious File Activity"),
         params.get("CommvaultAPIToken", {}).get("password"),
@@ -1323,9 +1235,7 @@ def get_params(params):
     )
 
 
-def validate_inputs(
-    portno, client, is_valid_cv_token, is_fetch, is_long_running, forwarding_rule_type
-):
+def validate_inputs(portno, client, is_fetch, is_long_running, forwarding_rule_type):
     try:
         if is_fetch and is_long_running:
             raise DemistoException(
@@ -1334,10 +1244,6 @@ def validate_inputs(
         if portno > 0 and client.is_port_in_use(portno):
             raise DemistoException(
                 f"Port [{portno}] is in use, please specify another port"
-            )
-        if not is_valid_cv_token:
-            raise DemistoException(
-                "Invalid Commvault API token/service URL."
             )
         if not is_fetch and not is_long_running:
             raise DemistoException(
@@ -1386,11 +1292,14 @@ def main() -> None:
         is_fetch,
         is_long_running,
     ) = get_params(params)
-    client = Client(base_url=cv_webservice_url + "api", verify=False, proxy=False)
-    is_valid_cv_token = None
+    client = Client(
+        base_url=cv_webservice_url + "api",
+        verify=False,
+        proxy=False,
+        api_token=cv_api_token,
+    )
     # Azure Key Vault Parameters
     client.set_props(params)
-    is_valid_cv_token = client.validate_session_or_generate_token(cv_api_token)
     forwarding_rule_type: str | None = params.get("forwardingRule")
     port: int = 0
     try:
@@ -1412,7 +1321,6 @@ def main() -> None:
             validate_inputs(
                 port,
                 client,
-                is_valid_cv_token,
                 is_fetch,
                 is_long_running,
                 forwarding_rule_type,
@@ -1470,8 +1378,6 @@ def main() -> None:
                 time.sleep(5)
         elif command == "commvault-security-set-disable-data-aging":
             return_results(disable_data_aging(client))
-        elif command == "commvault-security-get-generate-token":
-            return_results(generate_access_token(client, cv_api_token))
         elif command == "commvault-security-set-disable-saml-provider":
             return_results(fetch_and_disable_saml_identity_provider(client))
         elif command == "commvault-security-set-disable-user":

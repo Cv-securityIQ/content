@@ -53,25 +53,6 @@ There are no input arguments for this command.
 | --- | --- | --- |
 | CommvaultSecurityIQ.DisableDataAging | string | Status returned after calling disable data aging API | 
 
-### commvault-security-get-generate-token
-
-***
-Generate Token
-
-#### Base Command
-
-`commvault-security-get-generate-token`
-
-#### Input
-
-There are no input arguments for this command.
-
-#### Context Output
-
-| **Path** | **Type** | **Description** |
-| --- | --- | --- |
-| CommvaultSecurityIQ.GenerateToken | string | Status indicating whether successfully generated access token or not | 
-
 ### commvault-security-get-access-token-from-keyvault
 
 ***

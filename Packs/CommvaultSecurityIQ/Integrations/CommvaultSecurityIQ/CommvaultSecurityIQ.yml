@@ -99,14 +99,6 @@ script:
       description: Status returned after calling disable data aging API
       type: string
   - deprecated: false
-    description: Generate Token
-    execution: false
-    name: commvault-security-get-generate-token
-    outputs:
-    - contextPath: CommvaultSecurityIQ.GenerateToken
-      description: Status indicating whether successfully generated access token or not 
-      type: string
-  - deprecated: false
     description: Read the access token from KeyVault
     execution: false
     name: commvault-security-get-access-token-from-keyvault
@@ -139,7 +131,7 @@ script:
     - contextPath: CommvaultSecurityIQ.DisableUser
       description: Response indicating whether successfully disabled user or not.
       type: string
-  dockerimage: demisto/commvault:1.0.0.68497
+  dockerimage: demisto/commvault:1.0.0.87608
   feed: false
   isfetch: true
   longRunning: true
